@@ -1,17 +1,12 @@
 /**
  * one-good-article
  *
- * Opening the worker shows a random "best" Hacker News article from the last
- * few years, embedded in an iframe under a black bar (brand left, shuffle
- * right). Shuffling is just a link back to `/`, which serves a fresh random one.
- *
- * The iframe loads each article through a same-origin proxy (`/read?u=...`)
- * that strips X-Frame-Options / CSP frame-ancestors, so sites that normally
- * refuse to be embedded still render. See `proxyArticle` for the caveats.
+ * Opening the worker 302-redirects you to a random "best" Hacker News article
+ * from the last few years.
  *
  * The queue is built and refreshed entirely on demand — there is no cron. The
  * hot path is a single KV read (binding `LINKS`, key `QUEUE_KEY`): read the
- * cached queue, render a random entry. Then, asynchronously (via
+ * cached queue, redirect to a random entry. Then, asynchronously (via
  * `ctx.waitUntil`, after the response is sent), one fresh article is added to
  * the queue for next time. The queue is a rolling window capped at
  * `QUEUE_LENGTH`, so each visit adds one and drops the oldest.
@@ -44,13 +39,6 @@ export default {
       return Response.json({ length: queue.length, queue });
     }
 
-    // Same-origin proxy: re-serve an article with frame-blocking headers
-    // stripped so it can be embedded in the iframe. This is what makes the
-    // viewer work for sites that send X-Frame-Options / CSP frame-ancestors.
-    if (url.pathname === "/read") {
-      return proxyArticle(url.searchParams.get("u"));
-    }
-
     let queue = await readQueue(env);
 
     // Cold cache (fresh deploy, KV wiped): add one synchronously so we can
@@ -69,174 +57,19 @@ export default {
     const pick = queue[Math.floor(Math.random() * queue.length)];
 
     // On demand: kick off an async job to add one to the queue for next time.
-    // Runs after the response is returned, so it never slows the page load.
+    // Runs after the response is returned, so it never slows the redirect.
     ctx.waitUntil(addOne(env, queue));
 
-    return new Response(renderPage(pick), {
-      status: 200,
+    return new Response(null, {
+      status: 302,
       headers: {
-        "content-type": "text/html; charset=utf-8",
-        // Never cache — each load reshuffles to a random article.
+        location: pick.url,
+        // Never let a CDN/browser cache the redirect — each visit is random.
         "cache-control": "no-store",
       },
     });
   },
 };
-
-/** Escape a string for safe use inside an HTML attribute or text node. */
-function escapeHtml(str) {
-  return String(str ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/**
- * Render the viewer: a fixed black top bar (brand left, shuffle right) above a
- * full-bleed iframe of the article. The shuffle link points back to `/`, which
- * serves a fresh random article — no JS required.
- */
-function renderPage(pick) {
-  const url = escapeHtml(pick.url);
-  const title = escapeHtml(pick.title ?? "");
-  // The iframe loads the article through our same-origin proxy so that sites
-  // sending X-Frame-Options / CSP frame-ancestors still embed.
-  const proxied = escapeHtml("/read?u=" + encodeURIComponent(pick.url));
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>oga.tulv.in — one good article</title>
-<style>
-  html, body { margin: 0; height: 100%; background: #000; }
-  #bar {
-    height: 44px; box-sizing: border-box; padding: 0 14px;
-    background: #000; color: #fff;
-    display: flex; align-items: center; justify-content: space-between;
-    font: 600 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  }
-  #bar .left { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-  #bar .brand { color: #fff; text-decoration: none; letter-spacing: .02em; white-space: nowrap; }
-  #bar .title {
-    color: #888; font-weight: 400; font-size: 13px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  #bar .right { display: flex; align-items: center; gap: 4px; }
-  #bar a.icon, #bar a.ext {
-    display: inline-flex; align-items: center; justify-content: center;
-    color: #fff; text-decoration: none; border-radius: 6px;
-  }
-  #bar a.icon { width: 32px; height: 32px; }
-  #bar a.ext { height: 32px; padding: 0 10px; color: #aaa; font-weight: 400; font-size: 13px; }
-  #bar a.icon:hover, #bar a.ext:hover { background: #1c1c1c; color: #fff; }
-  #bar a.icon svg { width: 20px; height: 20px; }
-  iframe { display: block; border: 0; width: 100%; height: calc(100vh - 44px); background: #fff; }
-</style>
-</head>
-<body>
-  <div id="bar">
-    <div class="left">
-      <a class="brand" href="/">oga.tulv.in</a>
-      <span class="title">${title}</span>
-    </div>
-    <div class="right">
-      <a class="ext" href="${url}" target="_blank" rel="noopener noreferrer">open original ↗</a>
-      <a class="icon" href="/" title="Shuffle" aria-label="Shuffle to another article">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
-      </a>
-    </div>
-  </div>
-  <iframe src="${proxied}" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"></iframe>
-</body>
-</html>`;
-}
-
-/**
- * Fetch an article server-side and re-serve it from our origin so it can be
- * iframed. For HTML we strip frame-blocking <meta> tags and inject a <base> so
- * the page's own relative assets keep loading from the real site; the
- * problematic X-Frame-Options / CSP *headers* simply aren't forwarded. Other
- * content types (PDFs, images) are streamed through untouched.
- *
- * Note: this is an open-ish proxy limited to http/https. Some pages still won't
- * render (login walls, strict SPAs, JS framebusters) — the viewer's "open
- * original" link is the fallback for those.
- */
-async function proxyArticle(target) {
-  if (!target) return new Response("missing ?u=", { status: 400 });
-
-  let parsed;
-  try {
-    parsed = new URL(target);
-  } catch {
-    return new Response("bad url", { status: 400 });
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return new Response("unsupported scheme", { status: 400 });
-  }
-
-  let upstream;
-  try {
-    upstream = await fetch(parsed.toString(), {
-      redirect: "follow",
-      headers: {
-        // Look like a real browser so sites serve the normal page.
-        "user-agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.9",
-      },
-    });
-  } catch {
-    return new Response("upstream fetch failed", { status: 502 });
-  }
-
-  const contentType = upstream.headers.get("content-type") || "";
-
-  // Non-HTML (PDFs, images, etc.): stream through with its own content type.
-  if (!/\btext\/html\b/i.test(contentType)) {
-    return new Response(upstream.body, {
-      status: upstream.status,
-      headers: { "content-type": contentType, "cache-control": "no-store" },
-    });
-  }
-
-  let html = await upstream.text();
-  html = stripFrameBlockers(html);
-  html = injectBase(html, upstream.url || parsed.toString());
-
-  return new Response(html, {
-    status: upstream.status,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
-}
-
-/** Remove in-document CSP / X-Frame-Options <meta> tags that block framing. */
-function stripFrameBlockers(html) {
-  return html.replace(
-    /<meta[^>]+http-equiv=["']?(content-security-policy|x-frame-options)["']?[^>]*>/gi,
-    "",
-  );
-}
-
-/**
- * Inject a <base> tag so the proxied page's relative URLs resolve against the
- * original site (assets then load directly from there, not through us).
- */
-function injectBase(html, baseUrl) {
-  const base = `<base href="${escapeHtml(baseUrl)}">`;
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head[^>]*>/i, (m) => m + base);
-  }
-  return base + html;
-}
 
 /** Read and parse the cached queue from KV. Returns [] on miss/parse error. */
 async function readQueue(env) {
