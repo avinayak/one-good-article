@@ -5,6 +5,10 @@
  * few years, embedded in an iframe under a black bar (brand left, shuffle
  * right). Shuffling is just a link back to `/`, which serves a fresh random one.
  *
+ * The iframe loads each article through a same-origin proxy (`/read?u=...`)
+ * that strips X-Frame-Options / CSP frame-ancestors, so sites that normally
+ * refuse to be embedded still render. See `proxyArticle` for the caveats.
+ *
  * The queue is built and refreshed entirely on demand — there is no cron. The
  * hot path is a single KV read (binding `LINKS`, key `QUEUE_KEY`): read the
  * cached queue, render a random entry. Then, asynchronously (via
@@ -38,6 +42,13 @@ export default {
     if (url.pathname === "/queue") {
       const queue = await readQueue(env);
       return Response.json({ length: queue.length, queue });
+    }
+
+    // Same-origin proxy: re-serve an article with frame-blocking headers
+    // stripped so it can be embedded in the iframe. This is what makes the
+    // viewer work for sites that send X-Frame-Options / CSP frame-ancestors.
+    if (url.pathname === "/read") {
+      return proxyArticle(url.searchParams.get("u"));
     }
 
     let queue = await readQueue(env);
@@ -90,6 +101,9 @@ function escapeHtml(str) {
 function renderPage(pick) {
   const url = escapeHtml(pick.url);
   const title = escapeHtml(pick.title ?? "");
+  // The iframe loads the article through our same-origin proxy so that sites
+  // sending X-Frame-Options / CSP frame-ancestors still embed.
+  const proxied = escapeHtml("/read?u=" + encodeURIComponent(pick.url));
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -135,9 +149,93 @@ function renderPage(pick) {
       </a>
     </div>
   </div>
-  <iframe src="${url}" referrerpolicy="no-referrer-when-downgrade"></iframe>
+  <iframe src="${proxied}" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"></iframe>
 </body>
 </html>`;
+}
+
+/**
+ * Fetch an article server-side and re-serve it from our origin so it can be
+ * iframed. For HTML we strip frame-blocking <meta> tags and inject a <base> so
+ * the page's own relative assets keep loading from the real site; the
+ * problematic X-Frame-Options / CSP *headers* simply aren't forwarded. Other
+ * content types (PDFs, images) are streamed through untouched.
+ *
+ * Note: this is an open-ish proxy limited to http/https. Some pages still won't
+ * render (login walls, strict SPAs, JS framebusters) — the viewer's "open
+ * original" link is the fallback for those.
+ */
+async function proxyArticle(target) {
+  if (!target) return new Response("missing ?u=", { status: 400 });
+
+  let parsed;
+  try {
+    parsed = new URL(target);
+  } catch {
+    return new Response("bad url", { status: 400 });
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return new Response("unsupported scheme", { status: 400 });
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(parsed.toString(), {
+      redirect: "follow",
+      headers: {
+        // Look like a real browser so sites serve the normal page.
+        "user-agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.9",
+      },
+    });
+  } catch {
+    return new Response("upstream fetch failed", { status: 502 });
+  }
+
+  const contentType = upstream.headers.get("content-type") || "";
+
+  // Non-HTML (PDFs, images, etc.): stream through with its own content type.
+  if (!/\btext\/html\b/i.test(contentType)) {
+    return new Response(upstream.body, {
+      status: upstream.status,
+      headers: { "content-type": contentType, "cache-control": "no-store" },
+    });
+  }
+
+  let html = await upstream.text();
+  html = stripFrameBlockers(html);
+  html = injectBase(html, upstream.url || parsed.toString());
+
+  return new Response(html, {
+    status: upstream.status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+/** Remove in-document CSP / X-Frame-Options <meta> tags that block framing. */
+function stripFrameBlockers(html) {
+  return html.replace(
+    /<meta[^>]+http-equiv=["']?(content-security-policy|x-frame-options)["']?[^>]*>/gi,
+    "",
+  );
+}
+
+/**
+ * Inject a <base> tag so the proxied page's relative URLs resolve against the
+ * original site (assets then load directly from there, not through us).
+ */
+function injectBase(html, baseUrl) {
+  const base = `<base href="${escapeHtml(baseUrl)}">`;
+  if (/<head[^>]*>/i.test(html)) {
+    return html.replace(/<head[^>]*>/i, (m) => m + base);
+  }
+  return base + html;
 }
 
 /** Read and parse the cached queue from KV. Returns [] on miss/parse error. */

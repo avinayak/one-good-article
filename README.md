@@ -7,9 +7,14 @@ the left, a shuffle icon on the right. Live at **https://oga.tulv.in**.
 A queue of top links is cached in KV so each load is a single KV read — no live
 API call on the hot path.
 
-> Note: some sites send `X-Frame-Options`/CSP `frame-ancestors` headers that the
-> browser enforces, so they won't render inside the iframe. The bar has an
-> "open original ↗" link as a fallback for those.
+Articles are embedded through a same-origin proxy (`/read?u=...`) that strips
+`X-Frame-Options` / CSP `frame-ancestors` and injects a `<base>` tag, so sites
+that normally refuse to be framed still render.
+
+> Note: the proxy can't help with sites behind a JS bot-challenge (e.g.
+> Cloudflare's "Just a moment…"), hard SPAs, or login walls — a server-side
+> fetch never gets the real page. The bar's "open original ↗" link is the
+> fallback for those.
 
 ## How it works
 
