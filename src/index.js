@@ -54,11 +54,28 @@ export default {
       });
     }
 
-    const pick = queue[Math.floor(Math.random() * queue.length)];
+    // Avoid showing this visitor articles they've recently seen. The list of
+    // recent ids lives in a per-visitor cookie (KV can't do this — it's shared
+    // across everyone). Pick from the queue excluding those; if they've seen
+    // the whole queue, start the cycle over.
+    const seen = parseSeen(request);
+    const seenSet = new Set(seen);
+    const fresh = queue.filter((it) => !seenSet.has(String(it.id)));
+    const candidates = fresh.length > 0 ? fresh : queue;
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
 
     // On demand: kick off an async job to add one to the queue for next time.
     // Runs after the response is returned, so it never slows the redirect.
     ctx.waitUntil(addOne(env, queue));
+
+    // Remember this pick (most-recent first), capped so there's always at least
+    // a few fresh candidates left in the queue next time.
+    const queueLength = positiveInt(env.QUEUE_LENGTH, 50);
+    const recentCap = Math.max(1, queueLength - 5);
+    const nextSeen = [
+      String(pick.id),
+      ...seen.filter((id) => id !== String(pick.id)),
+    ].slice(0, recentCap);
 
     return new Response(null, {
       status: 302,
@@ -66,10 +83,21 @@ export default {
         location: pick.url,
         // Never let a CDN/browser cache the redirect — each visit is random.
         "cache-control": "no-store",
+        "set-cookie": `seen=${nextSeen.join(
+          ".",
+        )}; Path=/; Max-Age=86400; SameSite=Lax; Secure; HttpOnly`,
       },
     });
   },
 };
+
+/** Parse the visitor's recently-seen article ids from the `seen` cookie. */
+function parseSeen(request) {
+  const cookie = request.headers.get("cookie") || "";
+  const match = cookie.match(/(?:^|;\s*)seen=([^;]*)/);
+  if (!match) return [];
+  return match[1].split(".").filter(Boolean);
+}
 
 /** Read and parse the cached queue from KV. Returns [] on miss/parse error. */
 async function readQueue(env) {
