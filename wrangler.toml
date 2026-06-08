@@ -7,7 +7,7 @@ compatibility_date = "2025-01-01"
 [vars]
 QUEUE_LENGTH = "50"
 # Only cache stories with at least this many points (filters out weak links).
-MIN_SCORE = "200"
+MIN_SCORE = "100"
 # How far back to look — "best articles from the last N years".
 YEARS = "5"
 # Size of the candidate pool the on-demand top-up draws from (max 1000).
