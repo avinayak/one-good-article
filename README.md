@@ -1,15 +1,21 @@
 # one-good-article
 
-A Cloudflare Worker. Open it, get 302-redirected to a random *best* Hacker News
-article from the last few years. Live at **https://oga.tulv.in**.
+A Cloudflare Worker. Open it to read a random *best* Hacker News article from
+the last few years, embedded in an iframe under a black bar — `oga.tulv.in` on
+the left, a shuffle icon on the right. Live at **https://oga.tulv.in**.
 
-A queue of top links is cached in KV so the redirect is a single KV read — no
-live API call on the hot path.
+A queue of top links is cached in KV so each load is a single KV read — no live
+API call on the hot path.
+
+> Note: some sites send `X-Frame-Options`/CSP `frame-ancestors` headers that the
+> browser enforces, so they won't render inside the iframe. The bar has an
+> "open original ↗" link as a fallback for those.
 
 ## How it works
 
-- **`fetch`** reads the cached queue from KV and 302s to a random entry, then
-  fires an async job (`ctx.waitUntil`) to add one fresh article for next time.
+- **`fetch`** reads the cached queue from KV and renders a random entry in the
+  viewer, then fires an async job (`ctx.waitUntil`) to add one fresh article for
+  next time. The shuffle icon / brand link point back to `/` for a new article.
   The queue is a rolling window capped at `QUEUE_LENGTH`: each visit adds one and
   drops the oldest. **No cron** — the queue is built and refreshed purely on
   demand, by usage.

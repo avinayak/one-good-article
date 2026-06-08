@@ -1,12 +1,13 @@
 /**
  * one-good-article
  *
- * Opening the worker 302-redirects you to a random "best" Hacker News article
- * from the last few years.
+ * Opening the worker shows a random "best" Hacker News article from the last
+ * few years, embedded in an iframe under a black bar (brand left, shuffle
+ * right). Shuffling is just a link back to `/`, which serves a fresh random one.
  *
  * The queue is built and refreshed entirely on demand — there is no cron. The
  * hot path is a single KV read (binding `LINKS`, key `QUEUE_KEY`): read the
- * cached queue, redirect to a random entry. Then, asynchronously (via
+ * cached queue, render a random entry. Then, asynchronously (via
  * `ctx.waitUntil`, after the response is sent), one fresh article is added to
  * the queue for next time. The queue is a rolling window capped at
  * `QUEUE_LENGTH`, so each visit adds one and drops the oldest.
@@ -57,19 +58,87 @@ export default {
     const pick = queue[Math.floor(Math.random() * queue.length)];
 
     // On demand: kick off an async job to add one to the queue for next time.
-    // Runs after the response is returned, so it never slows the redirect.
+    // Runs after the response is returned, so it never slows the page load.
     ctx.waitUntil(addOne(env, queue));
 
-    return new Response(null, {
-      status: 302,
+    return new Response(renderPage(pick), {
+      status: 200,
       headers: {
-        location: pick.url,
-        // Never let a CDN/browser cache the redirect — each visit is random.
+        "content-type": "text/html; charset=utf-8",
+        // Never cache — each load reshuffles to a random article.
         "cache-control": "no-store",
       },
     });
   },
 };
+
+/** Escape a string for safe use inside an HTML attribute or text node. */
+function escapeHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Render the viewer: a fixed black top bar (brand left, shuffle right) above a
+ * full-bleed iframe of the article. The shuffle link points back to `/`, which
+ * serves a fresh random article — no JS required.
+ */
+function renderPage(pick) {
+  const url = escapeHtml(pick.url);
+  const title = escapeHtml(pick.title ?? "");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>oga.tulv.in — one good article</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  #bar {
+    height: 44px; box-sizing: border-box; padding: 0 14px;
+    background: #000; color: #fff;
+    display: flex; align-items: center; justify-content: space-between;
+    font: 600 14px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #bar .left { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+  #bar .brand { color: #fff; text-decoration: none; letter-spacing: .02em; white-space: nowrap; }
+  #bar .title {
+    color: #888; font-weight: 400; font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #bar .right { display: flex; align-items: center; gap: 4px; }
+  #bar a.icon, #bar a.ext {
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #fff; text-decoration: none; border-radius: 6px;
+  }
+  #bar a.icon { width: 32px; height: 32px; }
+  #bar a.ext { height: 32px; padding: 0 10px; color: #aaa; font-weight: 400; font-size: 13px; }
+  #bar a.icon:hover, #bar a.ext:hover { background: #1c1c1c; color: #fff; }
+  #bar a.icon svg { width: 20px; height: 20px; }
+  iframe { display: block; border: 0; width: 100%; height: calc(100vh - 44px); background: #fff; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <div class="left">
+      <a class="brand" href="/">oga.tulv.in</a>
+      <span class="title">${title}</span>
+    </div>
+    <div class="right">
+      <a class="ext" href="${url}" target="_blank" rel="noopener noreferrer">open original ↗</a>
+      <a class="icon" href="/" title="Shuffle" aria-label="Shuffle to another article">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+      </a>
+    </div>
+  </div>
+  <iframe src="${url}" referrerpolicy="no-referrer-when-downgrade"></iframe>
+</body>
+</html>`;
+}
 
 /** Read and parse the cached queue from KV. Returns [] on miss/parse error. */
 async function readQueue(env) {
