@@ -1,0 +1,30 @@
+name = "one-good-article"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# How many "best" HN links to keep cached in KV at all times.
+# This is the configurable queue length the redirect picks randomly from.
+[vars]
+QUEUE_LENGTH = "50"
+# Only cache stories with at least this many points (filters out weak links).
+MIN_SCORE = "200"
+# How far back to look — "best articles from the last N years".
+YEARS = "5"
+# Size of the candidate pool the on-demand top-up draws from (max 1000).
+POOL_SIZE = "500"
+
+# Persistent cache of pre-fetched HN links so redirects are instant.
+# Namespace "oga_links" (binding `LINKS` is what the worker code reads).
+[[kv_namespaces]]
+binding = "LINKS"
+id = "f45cc623af4b4341901009054cf3e51b"
+preview_id = "f45cc623af4b4341901009054cf3e51b"
+
+# Custom domain. Wrangler auto-creates the DNS record + SSL cert for this on
+# deploy (requires the `tulv.in` zone to live on this Cloudflare account).
+[[routes]]
+pattern = "oga.tulv.in"
+custom_domain = true
+
+# No cron — the queue is built and refreshed entirely on demand: each visit
+# fires an async job (ctx.waitUntil) that adds one article to the queue.
